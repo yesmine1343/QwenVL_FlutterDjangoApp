@@ -2,7 +2,6 @@ import os
 import cv2
 import numpy as np
 import json
-import tempfile  # 🔧 ADDED - was missing
 from datetime import datetime
 from PIL import Image
 import torch
@@ -12,16 +11,22 @@ from transformers.file_utils import TRANSFORMERS_CACHE
 import torch.nn.functional as F
 from collections import Counter
 from bidi.algorithm import get_display
-import re
 import torch
 import arabic_reshaper
+import tempfile
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("Transformers cache directory:", TRANSFORMERS_CACHE)
 
 def check_system_requirements():
+    """
+    Check if system meets requirements
+    """
     print("🔍 Checking system requirements...")
+    
+    # Check CUDA availability
     if torch.cuda.is_available():
         print(f"✓ CUDA available: {torch.cuda.get_device_name()}")
         try:
@@ -44,6 +49,9 @@ def check_system_requirements():
     print()
 
 def calculate_sequence_probability(logits, input_ids, start_idx=0):
+    """
+    Calculate the probability of the generated sequence from logits
+    """
     try:
         if logits is None or len(logits) == 0:
             return 0.75  # Default high confidence if no logits available
@@ -74,7 +82,9 @@ def calculate_sequence_probability(logits, input_ids, start_idx=0):
         raw_prob = np.exp(avg_log_prob)
         
         # Apply confidence boost for reasonable probabilities
+        # Transform very low probabilities to more reasonable confidence scores
         if raw_prob < 0.1:
+            # Boost very low probabilities using log scaling
             boosted_conf = 0.5 + (np.log10(raw_prob * 10 + 1) / 2)
             return min(0.9, max(0.5, boosted_conf))
         else:
@@ -85,6 +95,9 @@ def calculate_sequence_probability(logits, input_ids, start_idx=0):
         return 0.75
 
 def calculate_text_quality_metrics(text):
+    """
+    Calculate various quality metrics for the extracted text
+    """
     if not text or len(text.strip()) == 0:
         return {
             'length_score': 0.0,
@@ -95,65 +108,52 @@ def calculate_text_quality_metrics(text):
         }
     
     text = text.strip()
+    
     # Length score (reasonable text length) - more generous scoring
     if len(text) >= 20:
-        length_score = 1.0
+        length_score = 1.0  # Full score for 20+ characters
     else:
-        length_score = min(len(text) / 20.0, 1.0)  
-    good_chars = sum(1 for c in text if (
-        c.isalnum() or c.isspace() or 
-        c in '.,!?;:-\'\"éèàçù' or
-        '\u0600' <= c <= '\u06FF' or  # Arabic
-        '\u0750' <= c <= '\u077F' or  # Arabic Supplement  
-        '\u08A0' <= c <= '\u08FF' or  # Arabic Extended-A
-        '\uFB50' <= c <= '\uFDFF' or  # Arabic Presentation Forms-A
-        '\uFE70' <= c <= '\uFEFF'     # Arabic Presentation Forms-B
-    ))
+        length_score = min(len(text) / 20.0, 1.0)
+    
+    # Character quality (ratio of alphanumeric + punctuation to total)
+    good_chars = sum(1 for c in text if c.isalnum() or c.isspace() or c in '.,!?;:-\'\"éèàçù')
     character_ratio = good_chars / len(text) if len(text) > 0 else 0.0
     
-    # Word quality - more lenient for Arabic
+    # Word quality (reasonable words vs total tokens) - more lenient
     words = text.split()
     if len(words) == 0:
         word_ratio = 0.0
     else:
-        reasonable_words = sum(1 for word in words if len(word) >= 1)
+        reasonable_words = sum(1 for word in words if len(word) >= 1)  # Changed from > 1 to >= 1
         word_ratio = reasonable_words / len(words)
     
-    # Repetition penalty
+    # Repetition penalty (detect repetitive patterns) - less harsh
     word_counts = Counter(words)
     total_words = len(words)
     unique_words = len(word_counts)
     if total_words > 0:
-        repetition_penalty = min(unique_words / total_words, 0.95)
+        repetition_penalty = min(unique_words / total_words, 0.95)  # Cap at 0.95
     else:
         repetition_penalty = 0.0
     
-    # Language bonuses
-    arabic_bonus = 1.0
+    # French text bonus - check for French characteristics
     french_bonus = 1.0
-    
-    # Arabic text bonus
-    if contains_arabic(text):
-        arabic_bonus = 1.15  # 15% bonus for Arabic text
-        
-    # French text bonus
     if any(c in text for c in 'éèàçùâêîôûëïÿñ'):
         french_bonus = 1.1  # 10% bonus for French accents
     
-    # Overall quality score
+    # Overall quality score with adjusted weights and French bonus
     base_quality = (length_score * 0.15 + 
                    character_ratio * 0.35 + 
                    word_ratio * 0.35 + 
                    repetition_penalty * 0.15)
     
-    overall_quality = min(base_quality * arabic_bonus * french_bonus, 1.0)
+    overall_quality = min(base_quality * french_bonus, 1.0)
     
     return {
         'length_score': length_score,
         'character_ratio': character_ratio,
         'word_ratio': word_ratio,
         'repetition_penalty': repetition_penalty,
-        'arabic_bonus': arabic_bonus,
         'french_bonus': french_bonus,
         'overall_quality': overall_quality
     }
@@ -170,9 +170,9 @@ def calculate_attention_based_confidence(attention_weights):
         if hasattr(attention_weights, 'cpu'):
             attention_weights = attention_weights.cpu().numpy()
         
-        # Calculate entropy of attention distribution
+        # Calculate entropy of attention distribution (lower entropy = more focused = higher confidence)
         attention_flat = attention_weights.flatten()
-        attention_flat = attention_flat[attention_flat > 0]
+        attention_flat = attention_flat[attention_flat > 0]  # Remove zeros
         
         if len(attention_flat) == 0:
             return 0.5
@@ -183,7 +183,7 @@ def calculate_attention_based_confidence(attention_weights):
         # Calculate entropy
         entropy = -np.sum(attention_probs * np.log(attention_probs + 1e-10))
         
-        # Convert entropy to confidence
+        # Convert entropy to confidence (lower entropy = higher confidence)
         max_entropy = np.log(len(attention_probs))
         confidence = 1.0 - (entropy / max_entropy) if max_entropy > 0 else 0.5
         
@@ -193,15 +193,18 @@ def calculate_attention_based_confidence(attention_weights):
         print(f"Error calculating attention confidence: {e}")
         return 0.5
 
-def load_qwen_model():    
-    # HTTP/API note: To reduce first-request latency and download size for
-    # GET/POST on `api/ocrapi/`, we now try ONLY 1 model :
-    # 2) Qwen/Qwen2-VL-2B-Instruct .
+def load_qwen_model():
+    """
+    Load Qwen2-VL model with proper error handling and fallbacks
+    """
     models_to_try = [
-       
         {
             "id": "Qwen/Qwen2-VL-2B-Instruct",
-            "description": "Qwen2-VL 2B (Fallback - smallest if 2.5 cannot load)"
+            "description": "Qwen2-VL 2B (Recommended - smaller, faster)"
+        },
+        {
+            "id": "Qwen/Qwen2-VL-7B-Instruct", 
+            "description": "Qwen2-VL 7B (Larger, more accurate)"
         }
     ]
     
@@ -210,19 +213,17 @@ def load_qwen_model():
         description = model_info["description"]
         
         print(f"🔄 Trying to load: {description}")
-        print(f"🔄 Model ID: {model_id}")
         
         try:
-            # Import for Qwen models
+            # Import the correct model class for Qwen2-VL
             from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
             
-            # Load processor first
+            # Load processor first (smaller download)
             print("  Loading processor...")
             processor = AutoProcessor.from_pretrained(
                 model_id, 
                 trust_remote_code=True,
-                resume_download=True,
-                use_auth_token=False  # 🔧 Try without authentication
+                resume_download=True
             )
             
             # Load model with optimizations
@@ -234,24 +235,31 @@ def load_qwen_model():
                 trust_remote_code=True,
                 resume_download=True,
                 low_cpu_mem_usage=True,
-                output_attentions=True,
+                output_attentions=True,  # Enable attention output for confidence calculation
                 use_safetensors=True,
-                use_auth_token=False  # 🔧 Try without authentication
             )
+            
             print(f"✓ Successfully loaded: {description}")
-            print(f"✓ Model ID confirmed: {model_id}")
             return processor, model, model_id
+            
         except ImportError as e:
             print(f"  ✗ Import error: {e}")
-            print("  Try: pip install --upgrade transformers>=4.45.0 qwen-vl-utils")
-            continue
+            print("  Installing required packages...")
+            try:
+                import subprocess
+                subprocess.check_call(["pip", "install", "--upgrade", "transformers", "torch", "torchvision"])
+                print("  Packages updated, please restart the script")
+                return None, None, None
+            except:
+                print("  Please manually install: pip install --upgrade transformers torch torchvision")
+                continue
+                
         except Exception as e:
             error_msg = str(e)
-            print(f"  ✗ Failed to load {model_id}: {error_msg}")
-            print(f"  Full error: {e}")
+            print(f"  ✗ Failed to load {model_id}: {error_msg[:100]}...")
             continue
     
-    # Fallback to TrOCR
+    # If all Qwen models fail, try TrOCR as fallback
     print("🔄 All Qwen models failed, trying TrOCR fallback...")
     try:
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
@@ -267,205 +275,75 @@ def load_qwen_model():
         return None, None, None
 
 def reshape_text(text):
-    try:
-        # First, reshape Arabic characters to their proper forms
-        reshaped_text = arabic_reshaper.reshape(text)
-        # Then apply bidirectional algorithm for proper RTL display
-        display_text = get_display(reshaped_text)
-        # Debug output to see what's happening
-        print("reshaping test")
-        print(f"🔄 Original: {repr(text[:30])}")
-        print(f"🔄 Reshaped: {repr(reshaped_text[:30])}")
-        print(f"🔄 Display:  {repr(display_text[:30])}")
-        
-        return display_text
-    except Exception as e:
-        print(f"Warning: Text reshaping failed: {e}")
-        return text
+    reshaped_text = arabic_reshaper.reshape(text)
+    return get_display(reshaped_text)
 
 def contains_arabic(text):
-    if not text:
-        return False
-    arabic_ranges = [
-        (0x0600, 0x06FF),  # Arabic
-        (0x0750, 0x077F),  # Arabic Supplement
-        (0x08A0, 0x08FF),  # Arabic Extended-A
-        (0xFB50, 0xFDFF),  # Arabic Presentation Forms-A
-        (0xFE70, 0xFEFF),  # Arabic Presentation Forms-B
-        (0x1EE00, 0x1EEFF) # Arabic Mathematical Alphabetic Symbols
-    ]
-    
-    for char in text:
-        char_code = ord(char)
-        for start, end in arabic_ranges:
-            if start <= char_code <= end:
-                return True
-    return False
-
-# Just add this ONE line to your existing fix_arabic_ocr_issues function:
-
-def fix_arabic_ocr_issues(text):
-    if not contains_arabic(text):
-        return text    
-    # 🔧 ADD THIS LINE - Remove Japanese characters that leak into Arabic OCR
-    import re
-    text = re.sub(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]+', '', text)
-    corrections = {
-        # Reversed reading corrections
-        'ﺃﺮﻗﺃ': 'أقرأ',
-        'ﻥﺃ': 'أن',
-        'ﺩﻮﺗ': 'تود',
-        # ... rest of existing corrections
-        'ﺢﻴﺤﺻ': 'صحيح',
-        'ﻞﻜﺸﺑ': 'بشكل',
-        'ﺺﻨﻟﺍ': 'النص',
-        'ﺔﺑﺎﺘﻛ': 'كتابة',
-        'ﺓﺩﺎﻋﺇ': 'إعادة',
-        'ﻭﺃ': 'أو',
-        'ﻼﻴﺼﻔﺗ': 'تفصيلا',
-        'ﺮﺜﻛﺃ': 'أكثر',
-        'ﻪﻣﺪﻘﺗ': 'تقدمه',
-        'ﻢﻬﻓ': 'فهم',
-        'ﻊﻴﻄﺘﺳﺃ': 'أستطيع'
-    }
-    
-    fixed_text = text
-    for wrong, correct in corrections.items():
-        fixed_text = fixed_text.replace(wrong, correct)
-    
-    # Additional processing for mixed scripts
-    if '申し' in fixed_text:  # Keep this existing check
-        fixed_text = fixed_text.replace('申し', '')
-    
-    return fixed_text
-def debug_arabic_detection(text):
-    print(f"\n🔍 DEBUG: Arabic Detection Analysis")
-    print(f"Raw text length: {len(text)}")
-    print(f"First 50 chars: {repr(text[:50])}")
-    arabic_found = False
-    for i, char in enumerate(text[:20]):
-        char_code = ord(char)
-        is_arabic = any(start <= char_code <= end for start, end in [
-            (0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF),
-            (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)
-        ])
-        if is_arabic:
-            arabic_found = True
-        print(f"Char {i:2d}: '{char}' -> U+{char_code:04X} -> Arabic: {is_arabic}")
-    
-    detection_result = contains_arabic(text)
-    print(f"🎯 Arabic Detection Result: {detection_result}")
-    print(f"🎯 Any Arabic Found in Sample: {arabic_found}")
-    return detection_result
+    return any('\u0600' <= c <= '\u06FF' for c in text)
 
 def extract_text_qwen(image_file, processor, model, model_id, language="default", prompt_idx=None):
+    """
+    Use Qwen-VL or TrOCR to extract text from an image file-like object with improved Arabic support.
+    image_file: file-like object (e.g., Django InMemoryUploadedFile, Flask FileStorage, or Python file object)
+    prompt_idx: 1-based index (1=arabic, 2=french/english, 3=default). If None, use language logic.
+    
+    Why check for None? If prompt_idx is provided, it allows the API/frontend to explicitly control which prompt variant to use. If not provided (None), the function falls back to language-based selection for backward compatibility and flexibility.
+    """
     try:
-        # Handle both file paths and file objects
-        if isinstance(image_file, str):
+        # Load and preprocess image from file-like object
+        try:
             img = Image.open(image_file).convert("RGB")
-        else:
-            img = Image.open(image_file).convert("RGB")
+        except Exception as e:
+            return f"Error: Unable to open image file: {e}", 0.0, {}
         
         # Check if using TrOCR fallback
         if "trocr" in model_id.lower():
             return extract_text_trocr(img, processor, model)
         
         model_device = next(model.parameters()).device
-        
-        # Enhanced prompts for better Arabic handling
+        # Enhanced prompt with multiple attempts for different language priorities
         prompt_variants = [
-            # Variant 0: Language-neutral with RTL awareness
+            # Variant 1: Language-neutral approach
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": img},
-                    {"type": "text", "text": "Extract all text from this image exactly as written. Maintain original formatting, spacing, and preserve all characters including Arabic (right-to-left), French, English, numbers, and special characters. For Arabic text, preserve the correct reading direction. Output only the text content."}
+                    {"type": "text", "text": "Extract all text from this image exactly as written. Maintain original formatting, spacing, and preserve all characters including Arabic, French, English, numbers, and special characters. Output only the text content without any explanations."}
                 ]
             },
-            # Variant 1: Enhanced Arabic-focused with better instructions
+            # Variant 2: Arabic-focused
             {
                 "role": "user", 
                 "content": [
                     {"type": "image", "image": img},
-                    {"type": "text", "text": "اقرأ النص العربي في هذه الصورة بدقة تامة. سواء كان النص مكتوباً باليد أو بالكمبيوتر، احترم اتجاه الكتابة من اليمين إلى اليسار والتشكيل الصحيح للحروف العربية. حافظ على ترتيب الكلمات والجمل كما هي في الأصل. تأكد من أن الحروف العربية متصلة بشكل صحيح. أعطِ النص فقط دون أي شرح أو ترجمة."}
+                    {"type": "text", "text": "اقرأ النص في هذه الصورة بدقة. احترم اتجاه الكتابة العربية من اليمين إلى اليسار وشكل الحروف. أعطِ النص فقط. لا تعكس ترتيب الحروف أو الكلمات."}
                 ]
             },
-            # Variant : French-focused
+            # Variant 3: French-focused  
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": img},
-                    {"type": "text", "text": "Lisez précisément tout le texte dans cette image, en respectant les accents français et la ponctuation. Donnez uniquement le contenu textuel exact."}
+                    {"type": "text", "text": "Lisez précisément tout le texte manuscrit ou imprimé dans cette image, en respectant les accents français et la ponctuation. Donnez uniquement le contenu textuel exact."}
                 ]
             }
         ]
+        # Select prompt by prompt_idx if provided, else by language
         
-        # 🔧 FIXED: Detect Arabic in image to select appropriate prompt
-        # Convert image to text for language detection
-        try:
-            # Quick OCR to detect language in image
-            quick_prompt = {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": img},
-                    {"type": "text", "text": "What language is the text in this image? Answer with only: arabic, english, french, or other."}
-                ]
-            }
-            
-            quick_text_prompt = processor.apply_chat_template([quick_prompt], tokenize=False, add_generation_prompt=True)
-            quick_inputs = processor(
-                text=[quick_text_prompt], 
-                images=[img], 
-                return_tensors="pt",
-                padding=True
-            )
-            quick_inputs = {k: v.to(model_device) for k, v in quick_inputs.items()}
-            
-            with torch.no_grad():
-                quick_outputs = model.generate(
-                    **quick_inputs, 
-                    max_new_tokens=10,
-                    do_sample=False,
-                    temperature=0.1,
-                    pad_token_id=processor.tokenizer.eos_token_id
-                )
-            
-            quick_response = processor.decode(quick_outputs.sequences[0][len(quick_inputs["input_ids"][0]):], skip_special_tokens=True).strip().lower()
-            print(f"🔍 Language detection response: '{quick_response}'")
-            
-            # Determine language from response
-            detected_language = "default"
-            if "arabic" in quick_response:
-                detected_language = "arabic"
-            elif "french" in quick_response:
-                detected_language = "french"
-            elif "english" in quick_response:
-                detected_language = "english"
-            
-            print(f"🔍 Detected language: {detected_language}")
-            
-        except Exception as e:
-            print(f"⚠️ Language detection failed: {e}")
-            detected_language = language  # Fallback to provided language
-        
-        # Select prompt based on detected language or provided language
-        if detected_language == "arabic" or language == "arabic":
+    
+        if language == "arabic":
             selected_prompt = prompt_variants[1]
-            print("🔄 Using Arabic-focused prompt")
-        elif detected_language == "french" or language == "french" or detected_language == "english" or language == "english":
+        elif language == "french" or language == "english":
             selected_prompt = prompt_variants[2]
-            print("🔄 Using French-focused prompt")
         else:
             selected_prompt = prompt_variants[0]
-            print("🔄 Using general prompt")
 
-        # Try the selected prompt
+    # Try each prompt variant and collect results
         all_results = []
         messages = selected_prompt
         i = prompt_variants.index(messages)
-        
         try:
-            # Prepare inputs
+            # Prepare inputs for this variant
             text_prompt = processor.apply_chat_template([messages], tokenize=False, add_generation_prompt=True)
             variant_inputs = processor(
                 text=[text_prompt], 
@@ -473,27 +351,23 @@ def extract_text_qwen(image_file, processor, model, model_id, language="default"
                 return_tensors="pt",
                 padding=True
             )
-            
-            # Move to device
+            # Move to device if needed
             variant_inputs = {k: v.to(model_device) for k, v in variant_inputs.items()}
-            
             with torch.no_grad():
                 outputs = model.generate(
                     **variant_inputs, 
                     max_new_tokens=1024,
-                    do_sample=False,
+                    do_sample=False,  # Use greedy decoding for consistency
                     temperature=1.0,
                     pad_token_id=processor.tokenizer.eos_token_id,
                     output_scores=True,
                     return_dict_in_generate=True,
                     output_attentions=True
                 )
-            
             # Decode the response
             generated_ids = outputs.sequences[0][len(variant_inputs["input_ids"][0]):]
             text = processor.decode(generated_ids, skip_special_tokens=True).strip()
-            
-            # Calculate quality metrics
+            # Calculate quality score for this variant
             quality_metrics = calculate_text_quality_metrics(text)
             all_results.append({
                 'text': text,
@@ -503,65 +377,151 @@ def extract_text_qwen(image_file, processor, model, model_id, language="default"
                 'inputs': variant_inputs,
                 'quality_metrics': quality_metrics
             })
-            
         except Exception as e:
             print(f"Variant {i} failed: {e}")
         
         if not all_results:
             return "Error: All prompt variants failed", 0.0, {}
         
-        # Use the best result
-        best_result = all_results[0]  # Only one result in this simplified version
-        best_text = best_result['text']
-        
-        # Calculate confidence (simplified)
-        confidence = best_result['quality_metrics']['overall_quality']
-        
-        # 🔧 ENHANCED: Debug Arabic detection
-        print(f"\n🔍 Before Arabic processing: {repr(best_text[:100])}")
-        debug_arabic_detection(best_text)
-        
+        # Select the best result based on quality score
+        best_result = max(all_results, key=lambda x: x['quality_score'])
+        # Use the best result for the rest of the processing
+        messages = prompt_variants[best_result['variant_id']]
+        text_prompt = processor.apply_chat_template([messages], tokenize=False, add_generation_prompt=True)
+        inputs = best_result['inputs']
+        # Now generate additional samples from the best prompt for confidence estimation
+        confidence_scores = []
+        generated_texts = [best_result['text']]  # Start with the best variant result
+        # Generate 2 more samples using the best prompt with slight variations
+        for sample in range(2):
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs, 
+                    max_new_tokens=1024,
+                    do_sample=True,  # Use sampling for variation
+                    temperature=0.3,   # Low temperature for consistency
+                    top_p=0.8,        # Focused sampling
+                    pad_token_id=processor.tokenizer.eos_token_id,
+                    output_scores=True,
+                    return_dict_in_generate=True,
+                    output_attentions=True
+                )
+            # Decode the response
+            generated_ids = outputs.sequences[0][len(inputs["input_ids"][0]):]
+            text = processor.decode(generated_ids, skip_special_tokens=True).strip()
+            generated_texts.append(text)
+            # Calculate confidence metrics
+            confidence_metrics = {}
+            # 1. Sequence probability confidence
+            if hasattr(outputs, 'scores') and outputs.scores:
+                seq_prob = calculate_sequence_probability(
+                    [score[0].cpu().numpy() for score in outputs.scores],
+                    outputs.sequences[0].cpu().numpy(),
+                    len(inputs["input_ids"][0])
+                )
+                confidence_metrics['sequence_probability'] = seq_prob
+            # 2. Text quality confidence
+            quality_metrics = calculate_text_quality_metrics(text)
+            confidence_metrics['text_quality'] = quality_metrics['overall_quality']
+            # 3. Attention-based confidence (if available)
+            if hasattr(outputs, 'attentions') and outputs.attentions:
+                try:
+                    # Use the last layer's attention
+                    last_attention = outputs.attentions[-1][-1]  # Last layer, last head
+                    attention_conf = calculate_attention_based_confidence(last_attention)
+                    confidence_metrics['attention_confidence'] = attention_conf
+                except:
+                    confidence_metrics['attention_confidence'] = 0.5
+            # Combine confidence scores with better weighting
+            combined_confidence = (
+                confidence_metrics.get('sequence_probability', 0.75) * 0.4 +  # Reduced weight
+                confidence_metrics.get('text_quality', 0.75) * 0.5 +          # Increased weight  
+                confidence_metrics.get('attention_confidence', 0.75) * 0.1     # Minimal weight
+            )
+            confidence_scores.append(combined_confidence)
+        # Now calculate confidence for all generated texts
+        for i, text in enumerate(generated_texts):
+            confidence_metrics = {}
+            # Use the outputs from the corresponding generation
+            if i == 0:  # First text is from the best variant
+                current_outputs = best_result['outputs']
+                current_inputs = best_result['inputs']
+            else:  # Later texts from additional sampling
+                current_outputs = outputs  # Uses the last outputs from the loop
+                current_inputs = inputs
+            # 1. Sequence probability confidence
+            if hasattr(current_outputs, 'scores') and current_outputs.scores:
+                seq_prob = calculate_sequence_probability(
+                    [score[0].cpu().numpy() for score in current_outputs.scores],
+                    current_outputs.sequences[0].cpu().numpy(),
+                    len(current_inputs["input_ids"][0])
+                )
+                confidence_metrics['sequence_probability'] = seq_prob
+            # 2. Text quality confidence
+            quality_metrics = calculate_text_quality_metrics(text)
+            confidence_metrics['text_quality'] = quality_metrics['overall_quality']
+            # 3. Attention-based confidence (if available)
+            if hasattr(current_outputs, 'attentions') and current_outputs.attentions:
+                try:
+                    # Use the last layer's attention
+                    last_attention = current_outputs.attentions[-1][-1]  # Last layer, last head
+                    attention_conf = calculate_attention_based_confidence(last_attention)
+                    confidence_metrics['attention_confidence'] = attention_conf
+                except:
+                    confidence_metrics['attention_confidence'] = 0.5
+            # Combine confidence scores with better weighting
+            combined_confidence = (
+                confidence_metrics.get('sequence_probability', 0.75) * 0.4 +
+                confidence_metrics.get('text_quality', 0.75) * 0.5 +
+                confidence_metrics.get('attention_confidence', 0.75) * 0.1
+            )
+            confidence_scores.append(combined_confidence)
+        # Select the best result based on confidence (might be different from variant selection)
+        best_idx = np.argmax(confidence_scores)
+        best_text = generated_texts[best_idx]
+        best_confidence = confidence_scores[best_idx]
+        # Calculate consistency confidence (how similar are the generated texts)
+        consistency_score = calculate_consistency_score(generated_texts)
+        # Final confidence combines individual confidence with consistency
+        final_confidence = (best_confidence * 0.8 + consistency_score * 0.2)
+        # Apply minimum confidence threshold for good quality text
+        quality_metrics = calculate_text_quality_metrics(best_text)
+        if quality_metrics['overall_quality'] > 0.9 and consistency_score > 0.9:
+            final_confidence = max(final_confidence, 0.85)  # Boost high quality results
+        # Additional metrics for debugging/analysis
+        detailed_metrics = {
+            'individual_confidences': confidence_scores,
+            'consistency_score': consistency_score,
+            'generated_variants': len(set(generated_texts)),
+            'text_quality_metrics': quality_metrics,
+            'best_prompt_variant': best_result['variant_id'],
+            'prompt_variant_scores': [r['quality_score'] for r in all_results]
+        }
         # Apply Arabic reshaping if needed
         if contains_arabic(best_text):
-            print("🔄 ✅ Arabic detected! Applying fixes...")
-            try:
-                original_text = best_text
-                
-                # First fix common OCR issues
-                best_text = fix_arabic_ocr_issues(best_text)
-                print(f"🔄 ✅ OCR fixes applied!")
-                
-                # Then apply reshaping
-                best_text = reshape_text(best_text)
-                print(f"🔄 ✅ Reshaping applied!")
-                print(f"🔄 Before: {repr(original_text[:50])}")
-                print(f"🔄 After:  {repr(best_text[:50])}")
-            except Exception as e:
-                print(f"⚠️ Arabic processing failed: {e}")
-        else:
-            print("❌ No Arabic detected - no reshaping applied")
-        
-        detailed_metrics = {
-            'text_quality_metrics': best_result['quality_metrics'],
-            'arabic_detected': contains_arabic(best_text),
-            'model_version': '2.5' if '2.5' in model_id else '2.0'
-        }
-        
-        return best_text, confidence, detailed_metrics
-        
+            best_text = reshape_text(best_text)
+        return best_text, final_confidence, detailed_metrics
     except Exception as e:
         return f"Error processing image: {str(e)}", 0.0, {}
+    
+
 
 def calculate_consistency_score(texts):
-    """Calculate consistency between generated texts"""
+    """
+    Calculate how consistent the generated texts are
+    """
     if len(texts) <= 1:
         return 1.0
     
+    # Remove duplicates
     unique_texts = list(set(texts))
-    if len(unique_texts) == 1:
-        return 1.0
     
+    if len(unique_texts) == 1:
+        return 1.0  # Perfect consistency
+    
+    # Calculate average similarity between texts
     from difflib import SequenceMatcher
+    
     total_similarity = 0
     comparisons = 0
     
@@ -574,10 +534,13 @@ def calculate_consistency_score(texts):
     return total_similarity / comparisons if comparisons > 0 else 0.0
 
 def extract_text_trocr(img, processor, model):
-    """Fallback OCR using TrOCR"""
+    """
+    Fallback OCR using TrOCR with confidence estimation
+    """
     try:
         pixel_values = processor(img, return_tensors="pt").pixel_values
         
+        # Generate with scores for confidence calculation
         with torch.no_grad():
             outputs = model.generate(
                 pixel_values, 
@@ -589,8 +552,17 @@ def extract_text_trocr(img, processor, model):
         
         generated_text = processor.batch_decode(outputs.sequences, skip_special_tokens=True)[0]
         
+        # Calculate confidence based on text quality for TrOCR
         quality_metrics = calculate_text_quality_metrics(generated_text)
-        confidence = quality_metrics['overall_quality'] * 0.85
+        confidence = quality_metrics['overall_quality'] * 0.85  # Scale down for TrOCR
+        
+        # Sequence probability if available
+        if hasattr(outputs, 'scores') and outputs.scores:
+            seq_prob = calculate_sequence_probability(
+                [score[0].cpu().numpy() for score in outputs.scores],
+                outputs.sequences[0].cpu().numpy()
+            )
+            confidence = (confidence + seq_prob) / 2
         
         detailed_metrics = {
             'text_quality_metrics': quality_metrics,
@@ -604,49 +576,46 @@ def extract_text_trocr(img, processor, model):
 
 def validate_image(image_file):
     """
-    🔧 FIXED: Validate image file - handles both paths and file objects
+    Validate if image file can be processed
+    Args:
+        image_file: File object from file picker (e.g., request.files['image'])
     """
     try:
-        if isinstance(image_file, str):
-            # File path
-            with Image.open(image_file) as img:
-                img.verify()
-            with Image.open(image_file) as img:
-                width, height = img.size
-                if width < 50 or height < 50:
-                    return False, "Image too small (minimum 50x50)"
-                if width * height > 4096 * 4096:
-                    return False, "Image too large, consider resizing"
-        else:
-            # File object
-            current_pos = image_file.tell()
-            image_file.seek(0)
-            
-            with Image.open(image_file) as img:
-                img.verify()
-            
-            image_file.seek(0)
-            with Image.open(image_file) as img:
-                width, height = img.size
-                if width < 50 or height < 50:
-                    return False, "Image too small (minimum 50x50)"
-                if width * height > 4096 * 4096:
-                    return False, "Image too large, consider resizing"
-            
-            image_file.seek(current_pos)
+        # Save current position in case we need to reset
+        current_pos = image_file.tell()
         
+        # Reset to beginning of file
+        image_file.seek(0)
+        
+        # Check if image is not corrupted
+        with Image.open(image_file) as img:
+            img.verify()
+        
+        # Reset file pointer and reopen for size check (verify() invalidates the image)
+        image_file.seek(0)
+        with Image.open(image_file) as img:
+            width, height = img.size
+            if width < 50 or height < 50:
+                return False, "Image too small (minimum 50x50)"
+            if width * height > 4096 * 4096:  # Very large images
+                return False, "Image too large, consider resizing"
+        
+        # Reset file pointer to original position
+        image_file.seek(current_pos)
         return True, "Valid"
         
     except Exception as e:
-        if not isinstance(image_file, str):
-            try:
-                image_file.seek(current_pos)
-            except:
-                pass
+        # Reset file pointer in case of error
+        try:
+            image_file.seek(current_pos)
+        except:
+            pass
         return False, f"Invalid image: {str(e)}"
 
 def save_results_to_file(results, output_file):
-    """Save results to JSON file"""
+    """
+    Save results to JSON file with proper error handling
+    """
     try:
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -655,8 +624,13 @@ def save_results_to_file(results, output_file):
     except Exception as e:
         print(f"✗ Error saving results: {e}")
 
+
 def test_single_image(image_file):
-    """Process a single image file with detailed analysis"""
+    """
+    Process a single image file with detailed confidence analysis
+    Args:
+        image_file: File object from file picker (e.g., request.files['image'])
+    """
     print("🔄 Initializing model...")
     try:
         processor, model, model_id = load_qwen_model()
@@ -674,12 +648,8 @@ def test_single_image(image_file):
         print(f"✗ {validation_msg}")
         return
 
-    # Get filename for display
-    if isinstance(image_file, str):
-        filename = os.path.basename(image_file)
-    else:
-        filename = getattr(image_file, 'filename', 'uploaded_image') or 'uploaded_image'
-    
+    # Get filename for display (handle different file object types)
+    filename = getattr(image_file, 'filename', 'uploaded_image') or 'uploaded_image'
     print(f"🖼️  Processing: {filename}")
     
     text, confidence, detailed_metrics = extract_text_qwen(image_file, processor, model, model_id)
@@ -692,7 +662,13 @@ def test_single_image(image_file):
     else:
         print(f"✓ Overall Confidence: {confidence:.3f}")
         print(f"✓ Model used: {model_id}")
-        print(f"✓ Arabic detected: {detailed_metrics.get('arabic_detected', False)}")
+
+        # Detailed confidence breakdown
+        if 'individual_confidences' in detailed_metrics:
+            print(f"🔍 Individual Samples: {[f'{c:.3f}' for c in detailed_metrics['individual_confidences']]}")
+
+        if 'consistency_score' in detailed_metrics:
+            print(f"🔄 Consistency Score: {detailed_metrics['consistency_score']:.3f}")
 
         if 'text_quality_metrics' in detailed_metrics:
             tq = detailed_metrics['text_quality_metrics']
@@ -701,123 +677,73 @@ def test_single_image(image_file):
             print(f"   Word Quality: {tq['word_ratio']:.3f}")
             print(f"   Uniqueness: {tq['repetition_penalty']:.3f}")
             print(f"   Length Score: {tq['length_score']:.3f}")
-            if 'arabic_bonus' in tq:
-                print(f"   Arabic Bonus: {tq['arabic_bonus']:.3f}")
 
         print("\n📝 Extracted Text:")
         print("-" * 40)
         print(text)
-
 def run_ocr(image_file, language="default"):
     """
-    🔧 FIXED: Main OCR function for API integration
+    image_file: Django InMemoryUploadedFile or similar
+    language: string from frontend like 'arabic', 'french', 'english'
     """
-    # Create temp file from uploaded file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp:
-        for chunk in image_file.chunks():
-            temp.write(chunk)
-        temp_path = temp.name
-
+    temp_path = None
+    
     try:
+        # Step 1: Load the model
         processor, model, model_id = load_qwen_model()
         if processor is None:
             return {"error": "Model failed to load"}
-        
-        print(f"🤖 Loaded model: {model_id}")
-        
     except Exception as e:
         return {"error": f"Model loading failed: {e}"}
 
-    # 🔧 FIXED: Validate using temp_path (string) correctly
-    is_valid, validation_msg = validate_image(temp_path)
-    if not is_valid:
-        return {"error": validation_msg}
-
     try:
-        # Extract text using temp_path
-        text, confidence, details = extract_text_qwen(temp_path, processor, model, model_id, language=language)
+        # Step 2: Save uploaded file to temporary path
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp:
+            for chunk in image_file.chunks():
+                temp.write(chunk)
+            temp_path = temp.name
+
+        # Step 3: Validate the image using the temp file
+        # Reset file pointer first
+        image_file.seek(0)
+        is_valid, validation_msg = validate_image(image_file)
+        if not is_valid:
+            return {"error": validation_msg}
+
+        # Step 4: Open the temp file and pass it to extract_text_qwen
+        with open(temp_path, 'rb') as temp_file:
+            text, confidence, details = extract_text_qwen(
+                temp_file, 
+                processor, 
+                model, 
+                model_id, 
+                language=language
+            )
         
-        # Clean up temp file
-        os.remove(temp_path)
-        
-        # Enhanced response with proper Arabic detection
-        response = {
+        return {
             "text": text,
             "confidence": confidence,
-            "language": language,
-            "model_used": model_id,
-            "status": "success",
-            "text_analysis": {
-                "text_length": len(text),
-                "has_arabic": contains_arabic(text),  # 🔧 This should now work!
-                "has_french_accents": any(c in text for c in 'éèàçùâêîôûëïÿñ'),
-                "word_count": len(text.split()) if text else 0
-            },
             "details": details
         }
-        
-        # Debug output
-        print(f"🔍 Final Arabic detection: {contains_arabic(text)}")
-        if contains_arabic(text):
-            print(f"✅ Arabic confirmed in response!")
-        else:
-            print(f"❌ No Arabic in final response: {text[:50]}...")
-            
-        return response
-        
+    
     except Exception as e:
-        # Clean up temp file
-        try:
-            os.remove(temp_path)
-        except:
-            pass
         return {"error": str(e)}
-
+    
+    finally:
+        # Step 5: Clean up temporary file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass  # Ignore cleanup errors
 def main():
-    print("🚀 FIXED Qwen-VL OCR Script with Working Arabic Detection")
-    print("=" * 70)
-    
+    print("🚀 Enhanced Qwen-VL OCR Script with Dynamic Confidence")
+    print("=" * 60)
+    # Check system requirements
     check_system_requirements()
-    
-    # Check if user wants to force download 2.5 model
-    print("\n🔧 Model Download Options:")
-    print("1. Use existing models (default)")
-    print("2. Force download Qwen2.5-VL-3B-Instruct")
-    
-    choice = input("Enter choice (1 or 2): ").strip()
-    
-    if choice == "2":
-        print("\n🔄 Force downloading Qwen2.5-VL-3B-Instruct...")
-        processor, model, model_id = force_download_model("Qwen/Qwen2.5-VL-3B-Instruct")
-        if processor is None:
-            print("✗ Failed to download 2.5 model. Continuing with existing models...")
-        else:
-            print("✓ 2.5 model downloaded successfully!")
-            print("You can now restart the server to use the new model.")
-            return
-    
-    while True:
-        image_path = input("📁 Enter full path to image (or 'quit' to exit): ").strip().strip('"')
-        
-        if image_path.lower() == 'quit':
-            print("👋 Goodbye!")
-            break
-            
-        if not os.path.exists(image_path):
-            print(f"✗ File not found: {image_path}")
-            continue
-            
-        test_single_image(image_path)
-        
-        while True:
-            another = input("\n🔄 Process another image? (y/n): ").strip().lower()
-            if another in ['y', 'yes', 'n', 'no']:
-                break
-            print("Please enter 'y' or 'n'")
-        
-        if another in ['n', 'no']:
-            print("👋 Goodbye!")
-            break
+    image_path = input("📁 Enter full path to image: ").strip().strip('"')
+    test_single_image(image_path)
+
 
 if __name__ == "__main__":
     main()
