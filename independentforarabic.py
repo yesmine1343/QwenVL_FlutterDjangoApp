@@ -1,7 +1,16 @@
 from huggingface_hub import InferenceClient
 import base64
 from langchain_community.llms import HuggingFaceEndpoint
+import os
+from dotenv import load_dotenv
 
+# Load environment variables from token.env file
+load_dotenv("token.env")
+
+# Get HF token from environment variable
+HF_TOKEN = os.getenv("HF_TOKEN")
+if not HF_TOKEN:
+    raise ValueError("HF_TOKEN not found in environment variables. Please set it in your token.env file.")
 import os
 HF_TOKEN = os.getenv("HF_TOKEN")
 
