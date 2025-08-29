@@ -1,0 +1,906 @@
+===============================================================================
+                    COMPLETE OCR API DEVELOPMENT GUIDE
+                    From Endpoint Creation to Testing
+===============================================================================
+
+TABLE OF CONTENTS
+=================
+1. IP Address & Base URL Understanding
+2. Complete Step-by-Step Algorithm (Framework Agnostic)
+3. Django Implementation (Our Case)
+4. Flutter Frontend Implementation
+5. Testing & Debugging
+6. Key Takeaways & Best Practices
+7. Code Examples & Templates
+
+===============================================================================
+1. IP ADDRESS & BASE URL UNDERSTANDING
+===============================================================================
+
+WHY 127.0.0.1:8000?
+-------------------
+• 127.0.0.1 = Localhost (your own computer)
+• 8000 = Default Django development server port
+• This is the standard development setup
+
+Common Development Server URLs:
+• http://127.0.0.1:8000  (Localhost - same machine)
+• http://localhost:8000   (Localhost alias)
+• http://0.0.0.0:8000     (All interfaces)
+
+How to Find Your Server's IP:
+```bash
+# Check what port Django is running on
+python manage.py runserver
+# Output: Starting development server at http://127.0.0.1:8000/
+
+# Or specify a different port
+python manage.py runserver 8080
+# Then use: http://127.0.0.1:8080
+```
+
+===============================================================================
+2. COMPLETE STEP-BY-STEP ALGORITHM (FRAMEWORK AGNOSTIC)
+===============================================================================
+
+PHASE 1: BACKEND API DEVELOPMENT
+================================
+
+Step 1: Create API Endpoint Structure
+-------------------------------------
+```python
+# 1. Define URL patterns
+urlpatterns = [
+    path('api/endpoint/', YourView.as_view(), name='endpoint'),
+]
+
+# 2. Create View/Controller
+class YourView(View):
+    def get(self, request):
+        # Handle GET requests
+        pass
+    
+    def post(self, request):
+        # Handle POST requests
+        pass
+```
+
+Step 2: Implement Request Processing
+-----------------------------------
+```python
+def post(self, request):
+    # 1. Validate incoming data
+    if 'file' not in request.FILES:
+        return JsonResponse({'error': 'No file'}, status=400)
+    
+    # 2. Process the request
+    file = request.FILES['file']
+    language = request.POST.get('language', 'default')
+    
+    # 3. Call your business logic
+    result = your_processing_function(file, language)
+    
+    # 4. Return JSON response
+    return JsonResponse({
+        'text': result['text'],
+        'confidence': result['confidence'],
+        'status': 'success'
+    })
+```
+
+Step 3: Add Logging
+-------------------
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+def post(self, request):
+    # Log incoming request
+    logger.info(f"Processing request: {request.POST}")
+    
+    # Process request...
+    
+    # Log response
+    logger.info(f"Response: {result}")
+    return JsonResponse(result)
+```
+
+PHASE 2: FRONTEND/CLIENT DEVELOPMENT
+====================================
+
+Step 4: Create HTTP Request Function
+-----------------------------------
+```javascript
+// JavaScript/TypeScript example
+async function sendRequest(file, language) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('language', language);
+    
+    const response = await fetch('http://127.0.0.1:8000/api/endpoint/', {
+        method: 'POST',
+        body: formData
+    });
+    
+    return await response.json();
+}
+```
+
+Step 5: Add Response Handling & Logging
+---------------------------------------
+```javascript
+try {
+    const result = await sendRequest(file, language);
+    
+    // Log successful response
+    console.log('=== API RESPONSE ===');
+    console.log('Status:', response.status);
+    console.log('Data:', result);
+    
+    // Store results
+    this.extractedText = result.text;
+    this.confidence = result.confidence;
+    this.rawJson = JSON.stringify(result);
+    
+} catch (error) {
+    console.error('=== ERROR ===');
+    console.error('Error:', error);
+}
+```
+
+PHASE 3: TESTING
+================
+
+Step 6: Create Test Script
+--------------------------
+```python
+import requests
+
+def test_endpoint():
+    # 1. Health check
+    response = requests.get('http://127.0.0.1:8000/api/endpoint/')
+    print(f"Health check: {response.status_code}")
+    
+    # 2. Test with file
+    with open('test.jpg', 'rb') as f:
+        files = {'file': f}
+        data = {'language': 'english'}
+        response = requests.post('http://127.0.0.1:8000/api/endpoint/', 
+                               files=files, data=data)
+    
+    print(f"Response: {response.json()}")
+```
+
+===============================================================================
+3. DJANGO IMPLEMENTATION (OUR CASE)
+===============================================================================
+
+MOST IMPORTANT DJANGO SYNTAX
+============================
+
+URLs Configuration (urls.py)
+----------------------------
+```python
+from django.urls import path
+from .views import QwenOCRView
+
+urlpatterns = [
+    path('api/ocrapi/', QwenOCRView.as_view(), name='qwen-ocr'),
+]
+```
+
+View Implementation (views.py)
+-----------------------------
+```python
+from django.http import JsonResponse
+from django.views import View
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class QwenOCRView(View):
+    def get(self, request):
+        # Health check endpoint
+        return JsonResponse({
+            'message': 'OCR endpoint ready',
+            'status': 'ready'
+        })
+    
+    def post(self, request):
+        # Handle file upload and processing
+        try:
+            # 1. Validate file
+            if 'file' not in request.FILES:
+                return JsonResponse({'error': 'No file'}, status=400)
+            
+            file = request.FILES['file']
+            language = request.POST.get('language', 'default')
+            
+            # 2. Process with your OCR function
+            text, confidence = extract_text_qwen(file, language)
+            
+            # 3. Return JSON response
+            return JsonResponse({
+                'text': text,
+                'confidence': confidence,
+                'language': language,
+                'status': 'success'
+            })
+            
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=500)
+```
+
+File Upload Handling
+--------------------
+```python
+# Access uploaded file
+file = request.FILES['file']
+
+# Validate file type
+allowed_types = ['image/jpeg', 'image/png']
+if file.content_type not in allowed_types:
+    return JsonResponse({'error': 'Invalid file type'}, status=400)
+
+# Validate file size
+if file.size > 10 * 1024 * 1024:  # 10MB
+    return JsonResponse({'error': 'File too large'}, status=400)
+```
+
+JSON Response Patterns
+---------------------
+```python
+# Success response
+return JsonResponse({
+    'text': 'extracted text',
+    'confidence': 0.95,
+    'language': 'english',
+    'model_used': 'Qwen2-VL',
+    'status': 'success'
+})
+
+# Error response
+return JsonResponse({
+    'error': 'Error description',
+    'status': 'error'
+}, status=400)
+```
+
+===============================================================================
+4. FLUTTER FRONTEND IMPLEMENTATION
+===============================================================================
+
+API Configuration
+-----------------
+```dart
+// API Configuration - URLs for HTTP requests to Django backend
+static const String _baseUrl = 'http://127.0.0.1:8000'; // Django development server URL
+static const String _apiEndpoint = '/api/ocrapi/'; // OCR API endpoint path
+```
+
+File Picker Function
+--------------------
+```dart
+// File picker function - allows user to select image file for OCR processing
+// This function prepares the file and language data before making HTTP request
+Future<void> _pickImage(String language) async {
+  try {
+    // Open file picker dialog to select image file
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+      dialogTitle: 'Select image for $language processing',
+    );
+
+    if (result != null && result.files.isNotEmpty) {
+      String? filePath = result.files.first.path;
+      if (filePath != null) {
+        // Store selected file and language for HTTP request
+        setState(() {
+          _selectedFile = File(filePath);
+          _selectedLanguage = language;
+          _extractedText = null;
+          _confidence = null;
+          _errorMessage = null;
+        });
+
+        if (kDebugMode) {
+          debugPrint('Selected image: $filePath for $language');
+        }
+
+        // Automatically trigger HTTP POST request to OCR endpoint
+        await _processImage();
+      }
+    }
+  } catch (e) {
+    if (kDebugMode) {
+      debugPrint('Error picking file: $e');
+    }
+    _showError('Error selecting image: $e');
+  }
+}
+```
+
+Main HTTP Request Function
+--------------------------
+```dart
+// Main HTTP request function - sends image file and language to OCR API endpoint
+// This function creates a multipart POST request to the Django backend
+Future<void> _processImage() async {
+  // Validate that we have both file and language before making HTTP request
+  if (_selectedFile == null || _selectedLanguage == null) {
+    _showError('Please select an image and language first');
+    return;
+  }
+
+  // Set processing state to show loading indicator during HTTP request
+  setState(() {
+    _isProcessing = true;
+    _errorMessage = null;
+  });
+
+  try {
+    // Create multipart POST request to OCR API endpoint
+    // MultipartRequest is used because we need to send both file and form data
+    var request = http.MultipartRequest(
+      'POST',
+      Uri.parse('$_baseUrl$_apiEndpoint'), // Full URL: http://127.0.0.1:8000/api/ocrapi/
+    );
+
+    // Prepare image file for HTTP request - convert file to multipart format
+    var fileStream = http.ByteStream(_selectedFile!.openRead());
+    var fileLength = await _selectedFile!.length();
+    var multipartFile = http.MultipartFile(
+      'file', // Field name expected by Django backend
+      fileStream,
+      fileLength,
+      filename: _selectedFile!.path.split('/').last, // Original filename
+    );
+    request.files.add(multipartFile);
+
+    // Add language parameter to form data - backend expects 'language' field
+    // Valid values: 'arabic', 'french', 'english', 'default'
+    request.fields['language'] = _selectedLanguage!;
+
+    // Log HTTP request details for debugging
+    if (kDebugMode) {
+      debugPrint('Sending request to: $_baseUrl$_apiEndpoint');
+      debugPrint('Language: $_selectedLanguage');
+      debugPrint('File: ${_selectedFile!.path}');
+    }
+
+    // Execute HTTP POST request and wait for Django backend response
+    var response = await request.send();
+
+    // Parse JSON response from Django backend
+    var responseData = await response.stream.bytesToString();
+    var jsonResponse = json.decode(responseData);
+
+    // Log complete HTTP response from Django backend for debugging
+    if (kDebugMode) {
+      debugPrint('=== OCR API RESPONSE ===');
+      debugPrint('Response status: ${response.statusCode}');
+      debugPrint('Response headers: ${response.headers}');
+      debugPrint('Response data: $jsonResponse');
+      debugPrint('========================');
+    }
+
+    // Handle successful HTTP response (status 200) from OCR endpoint
+    if (response.statusCode == 200) {
+      // Log successful OCR results from backend processing
+      if (kDebugMode) {
+        debugPrint('=== OCR SUCCESS ===');
+        debugPrint('Extracted text: ${jsonResponse['text']}');
+        debugPrint('Confidence: ${jsonResponse['confidence']}');
+        debugPrint('Language: ${jsonResponse['language']}');
+        debugPrint('Model used: ${jsonResponse['model_used']}');
+        debugPrint('===================');
+      }
+      
+      // Update UI with OCR results from backend response
+      setState(() {
+        _extractedText = jsonResponse['text']; // Text extracted by Qwen model
+        _confidence = jsonResponse['confidence']?.toDouble(); // Confidence score
+        _rawJsonResponse = responseData; // Store raw JSON for debugging
+        _isProcessing = false;
+      });
+
+      _showSuccess('Text extracted successfully!');
+    } else {
+      // Handle HTTP error responses from backend (4xx, 5xx status codes)
+      String errorMsg = jsonResponse['error'] ?? 'Unknown error occurred';
+      
+      // Log error details from backend response
+      if (kDebugMode) {
+        debugPrint('=== OCR ERROR ===');
+        debugPrint('Error message: $errorMsg');
+        debugPrint('Status code: ${response.statusCode}');
+        debugPrint('Full response: $jsonResponse');
+        debugPrint('================');
+      }
+      
+      setState(() {
+        _errorMessage = errorMsg;
+        _isProcessing = false;
+      });
+      _showError(errorMsg);
+    }
+  } catch (e) {
+    // Handle network/connection errors when HTTP request fails
+    // This catches issues like: server not running, network timeout, etc.
+    if (kDebugMode) {
+      debugPrint('=== CONNECTION ERROR ===');
+      debugPrint('Error type: ${e.runtimeType}');
+      debugPrint('Error message: $e');
+      debugPrint('Stack trace: ${StackTrace.current}');
+      debugPrint('=======================');
+    }
+    setState(() {
+      _errorMessage = 'Connection error: $e';
+      _isProcessing = false;
+    });
+    _showError('Connection error: $e');
+  }
+}
+```
+
+Clear Results Function
+----------------------
+```dart
+// Clear all data including HTTP response results and selected file
+// This resets the app state for a new OCR request
+void _clearResults() {
+  setState(() {
+    _extractedText = null; // Clear OCR result from backend
+    _confidence = null; // Clear confidence score from backend
+    _errorMessage = null; // Clear any error messages
+    _rawJsonResponse = null; // Clear raw JSON response from backend
+    _selectedFile = null; // Clear selected image file
+    _selectedLanguage = null; // Clear selected language
+  });
+}
+```
+
+Raw JSON Viewer Button
+----------------------
+```dart
+// Button to view raw JSON response from OCR API endpoint
+ElevatedButton.icon(
+  onPressed: () {
+    if (_rawJsonResponse != null) {
+      if (kDebugMode) {
+        debugPrint('=== RAW JSON RESPONSE ===');
+        debugPrint(_rawJsonResponse);
+        debugPrint('========================');
+      }
+      _showSuccess('Raw JSON logged to console!');
+    }
+  },
+  icon: const Icon(Icons.code, size: 16),
+  label: const Text('View JSON'),
+),
+```
+
+===============================================================================
+5. TESTING & DEBUGGING
+===============================================================================
+
+Test Script Implementation
+-------------------------
+```python
+#!/usr/bin/env python3
+"""
+Test script for the OCR API endpoint
+Tests the /api/ocrapi/ endpoint with file upload and language parameter
+"""
+
+import requests
+import json
+import os
+import sys
+from pathlib import Path
+
+# Configuration - URLs for testing the OCR API endpoint
+BASE_URL = "http://127.0.0.1:8000"  # Django development server URL
+API_ENDPOINT = "/api/ocrapi/"       # OCR API endpoint path
+FULL_URL = BASE_URL + API_ENDPOINT  # Complete URL for HTTP requests
+
+def test_endpoint_health():
+    """Test if the OCR API endpoint is accessible via HTTP GET request"""
+    print("🔍 Testing endpoint health...")
+    try:
+        # Send HTTP GET request to check if Django server is running
+        response = requests.get(FULL_URL)
+        print(f"✅ GET request successful: {response.status_code}")
+        print(f"Response: {response.json()}")
+        return True
+    except requests.exceptions.ConnectionError:
+        print("❌ Connection failed. Make sure Django server is running on http://127.0.0.1:8000")
+        return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def test_ocr_with_file(image_path, language="default"):
+    """Test OCR API endpoint with a specific image file and language via HTTP POST"""
+    print(f"\n🔍 Testing OCR with file: {image_path}")
+    print(f"Language: {language}")
+    
+    if not os.path.exists(image_path):
+        print(f"❌ File not found: {image_path}")
+        return False
+    
+    try:
+        # Prepare multipart HTTP POST request - same format as Flutter app
+        with open(image_path, 'rb') as f:
+            files = {'file': (os.path.basename(image_path), f, 'image/jpeg')}  # File field for Django
+            data = {'language': language}  # Language parameter for OCR processing
+            
+            print(f"📤 Sending POST request to: {FULL_URL}")
+            print(f"📁 File: {image_path}")
+            print(f"🌐 Language: {language}")
+            
+            # Send HTTP POST request to OCR endpoint
+            response = requests.post(FULL_URL, files=files, data=data)
+            
+            print(f"📥 Response status: {response.status_code}")
+            print(f"📥 Response headers: {dict(response.headers)}")
+            
+            # Parse JSON response from Django backend OCR processing
+            try:
+                json_response = response.json()
+                print("\n=== OCR RESPONSE ===")
+                print(json.dumps(json_response, indent=2, ensure_ascii=False))
+                print("===================")
+                
+                # Check if HTTP request was successful (status 200)
+                if response.status_code == 200:
+                    print("✅ OCR successful!")
+                    print(f"📝 Extracted text: {json_response.get('text', 'N/A')}")
+                    print(f"🎯 Confidence: {json_response.get('confidence', 'N/A')}")
+                    print(f"🌐 Language: {json_response.get('language', 'N/A')}")
+                    print(f"🤖 Model: {json_response.get('model_used', 'N/A')}")
+                    return True
+                else:
+                    # Handle HTTP error responses from backend
+                    print(f"❌ OCR failed: {json_response.get('error', 'Unknown error')}")
+                    return False
+                    
+            except json.JSONDecodeError:
+                print(f"❌ Invalid JSON response: {response.text}")
+                return False
+                
+    except Exception as e:
+        print(f"❌ Request failed: {e}")
+        return False
+
+def test_error_cases():
+    """Test various HTTP error scenarios for the OCR API endpoint"""
+    print("\n🔍 Testing error cases...")
+    
+    # Test 1: HTTP POST without file - should return 400 error
+    print("\n--- Test 1: No file uploaded ---")
+    try:
+        response = requests.post(FULL_URL, data={'language': 'english'})
+        print(f"Status: {response.status_code}")
+        print(f"Response: {response.json()}")
+    except Exception as e:
+        print(f"Error: {e}")
+    
+    # Test 2: HTTP POST with invalid language parameter - should return 400 error
+    print("\n--- Test 2: Invalid language ---")
+    try:
+        with open('test_image.jpg', 'w') as f:
+            f.write('fake image data')
+        
+        with open('test_image.jpg', 'rb') as f:
+            files = {'file': ('test.jpg', f, 'image/jpeg')}
+            data = {'language': 'invalid_language'}  # Invalid language value
+            response = requests.post(FULL_URL, files=files, data=data)
+            print(f"Status: {response.status_code}")
+            print(f"Response: {response.json()}")
+        
+        os.remove('test_image.jpg')
+    except Exception as e:
+        print(f"Error: {e}")
+    
+    # Test 3: HTTP POST with oversized file - should return 400 error
+    print("\n--- Test 3: Large file ---")
+    try:
+        # Create a large fake file (11MB) to test file size validation
+        large_file_path = 'large_test.jpg'
+        with open(large_file_path, 'wb') as f:
+            f.write(b'0' * (11 * 1024 * 1024))  # 11MB file
+        
+        with open(large_file_path, 'rb') as f:
+            files = {'file': ('large.jpg', f, 'image/jpeg')}
+            data = {'language': 'english'}
+            response = requests.post(FULL_URL, files=files, data=data)
+            print(f"Status: {response.status_code}")
+            print(f"Response: {response.json()}")
+        
+        os.remove(large_file_path)
+    except Exception as e:
+        print(f"Error: {e}")
+
+def find_test_images():
+    """Find test images in the current directory for HTTP POST testing"""
+    print("\n🔍 Looking for test images...")
+    
+    # Supported image formats for OCR API endpoint
+    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+    test_images = []
+    
+    # Search for image files to use in HTTP requests
+    for ext in image_extensions:
+        test_images.extend(Path('.').glob(f'*{ext}'))
+        test_images.extend(Path('.').glob(f'*{ext.upper()}'))
+    
+    if not test_images:
+        print("❌ No test images found in current directory")
+        print("💡 Place some image files (.jpg, .png, etc.) in this directory to test")
+        return []
+    
+    print(f"✅ Found {len(test_images)} test images:")
+    for img in test_images:
+        print(f"  - {img}")
+    
+    return test_images
+
+def main():
+    """Main test function - comprehensive testing of OCR API endpoint via HTTP"""
+    print("🚀 OCR API Endpoint Test Script")
+    print("=" * 50)
+    
+    # Test endpoint health via HTTP GET request
+    if not test_endpoint_health():
+        print("\n❌ Endpoint health check failed. Exiting.")
+        sys.exit(1)
+    
+    # Find test images for HTTP POST requests
+    test_images = find_test_images()
+    
+    if test_images:
+        # Test HTTP POST requests with each image and different languages
+        languages = ['english', 'french', 'arabic', 'default']
+        
+        for img_path in test_images[:3]:  # Test first 3 images
+            for language in languages:
+                success = test_ocr_with_file(str(img_path), language)
+                if success:
+                    print(f"✅ Test passed for {img_path} with {language}")
+                else:
+                    print(f"❌ Test failed for {img_path} with {language}")
+                print("-" * 40)
+    
+    # Test HTTP error scenarios
+    test_error_cases()
+    
+    print("\n🎉 Test script completed!")
+
+if __name__ == "__main__":
+    main()
+```
+
+Console Output Examples
+-----------------------
+Successful OCR:
+```
+=== OCR API RESPONSE ===
+Response status: 200
+Response headers: {content-type: application/json, ...}
+Response data: {text: "Hello World", confidence: 0.95, ...}
+========================
+
+=== OCR SUCCESS ===
+Extracted text: Hello World
+Confidence: 0.95
+Language: english
+Model used: Qwen/Qwen2-VL-2B-Instruct
+===================
+```
+
+Error Response:
+```
+=== OCR ERROR ===
+Error message: File too large. Maximum size is 10MB
+Status code: 400
+Full response: {error: "File too large...", status: "error"}
+================
+```
+
+===============================================================================
+6. KEY TAKEAWAYS & BEST PRACTICES
+===============================================================================
+
+UNIVERSAL PATTERN FOR ANY FRAMEWORK
+===================================
+1. Define endpoint URL (/api/endpoint/)
+2. Create request handler (GET/POST methods)
+3. Validate input (files, parameters)
+4. Process with business logic (OCR, ML, etc.)
+5. Return structured JSON (success/error)
+6. Add logging (requests, responses, errors)
+7. Test with client (HTTP requests)
+8. Handle responses (parse JSON, display results)
+
+ESSENTIAL HTTP CONCEPTS
+=======================
+• Multipart requests for file uploads
+• JSON responses for structured data
+• HTTP status codes (200=success, 400=client error, 500=server error)
+• CORS handling for cross-origin requests
+• Error handling for network issues
+
+COMPLETE FLOW DIAGRAM
+=====================
+1. Client (Flutter)                   2. Server (Django)
+   ├── Select file & language         ├── Receive HTTP POST
+   ├── Create multipart request       ├── Validate file & language
+   ├── Send to /api/ocrapi/           ├── Process with OCR model
+   └── Wait for response              └── Return JSON response
+                                      └── Log to console/terminal
+
+3. Client receives response
+   ├── Parse JSON
+   ├── Display results in UI
+   ├── Log to debug console
+   └── Store raw JSON for debugging
+
+BEST PRACTICES
+==============
+1. Always validate input on both client and server
+2. Use proper HTTP status codes
+3. Log all requests and responses for debugging
+4. Handle errors gracefully
+5. Store raw responses for debugging
+6. Test with multiple scenarios
+7. Use descriptive variable names
+8. Add comprehensive comments
+
+===============================================================================
+7. CODE EXAMPLES & TEMPLATES
+===============================================================================
+
+QUICK START TEMPLATE - DJANGO
+=============================
+
+urls.py:
+```python
+from django.urls import path
+from .views import YourAPIView
+
+urlpatterns = [
+    path('api/your-endpoint/', YourAPIView.as_view(), name='your-api'),
+]
+```
+
+views.py:
+```python
+from django.http import JsonResponse
+from django.views import View
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+import logging
+
+logger = logging.getLogger(__name__)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class YourAPIView(View):
+    def get(self, request):
+        return JsonResponse({'status': 'ready'})
+    
+    def post(self, request):
+        try:
+            # Validate input
+            if 'file' not in request.FILES:
+                return JsonResponse({'error': 'No file'}, status=400)
+            
+            file = request.FILES['file']
+            param = request.POST.get('param', 'default')
+            
+            # Process
+            result = your_function(file, param)
+            
+            # Return response
+            return JsonResponse({
+                'result': result,
+                'status': 'success'
+            })
+            
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            return JsonResponse({'error': str(e)}, status=500)
+```
+
+QUICK START TEMPLATE - FLUTTER
+==============================
+
+```dart
+// API Configuration
+static const String _baseUrl = 'http://127.0.0.1:8000';
+static const String _apiEndpoint = '/api/your-endpoint/';
+
+// HTTP Request Function
+Future<void> _sendRequest(File file, String param) async {
+  try {
+    var request = http.MultipartRequest(
+      'POST',
+      Uri.parse('$_baseUrl$_apiEndpoint'),
+    );
+
+    request.files.add(
+      http.MultipartFile(
+        'file',
+        file.openRead(),
+        await file.length(),
+        filename: file.path.split('/').last,
+      ),
+    );
+    request.fields['param'] = param;
+
+    var response = await request.send();
+    var responseData = await response.stream.bytesToString();
+    var jsonResponse = json.decode(responseData);
+
+    if (response.statusCode == 200) {
+      // Handle success
+      setState(() {
+        _result = jsonResponse['result'];
+      });
+    } else {
+      // Handle error
+      _showError(jsonResponse['error']);
+    }
+  } catch (e) {
+    _showError('Connection error: $e');
+  }
+}
+```
+
+QUICK START TEMPLATE - TEST SCRIPT
+==================================
+
+```python
+import requests
+
+def test_api():
+    url = "http://127.0.0.1:8000/api/your-endpoint/"
+    
+    # Health check
+    response = requests.get(url)
+    print(f"Health: {response.status_code}")
+    
+    # Test with file
+    with open('test.jpg', 'rb') as f:
+        files = {'file': f}
+        data = {'param': 'test'}
+        response = requests.post(url, files=files, data=data)
+    
+    print(f"Response: {response.json()}")
+
+if __name__ == "__main__":
+    test_api()
+```
+
+===============================================================================
+CONCLUSION
+===============================================================================
+
+This guide provides a complete framework for building API endpoints with file upload,
+processing, and comprehensive testing. The patterns shown here work for any framework
+and can be adapted to different use cases beyond OCR.
+
+Key Success Factors:
+• Proper HTTP request/response handling
+• Comprehensive error handling and logging
+• Thorough testing with multiple scenarios
+• Clear separation of concerns
+• Well-documented code with comments
+
+Remember: The core concepts remain the same regardless of the framework you choose!
+=============================================================================== 
