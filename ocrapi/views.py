@@ -2,8 +2,9 @@ from django.http import JsonResponse
 from django.views import View
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from test_ocr import run_ocr
-
+from independentforarabic import ocr_with_gemini as ocr_with_gemini_arabic
+from independent import ocr_with_gemini as ocr_with_gemini_latin
+#type python manage.py runserver to run server. required version py>=3.9
 @method_decorator(csrf_exempt, name='dispatch')
 class MyView(View):
     def post(self, request):
@@ -15,7 +16,10 @@ class MyView(View):
         # Get the language parameter
         language = request.POST.get('language', 'default')
         
-        # Call your existing run_ocr function
-        result = run_ocr(uploaded_file, language)
+        if language== 'arabic':
+            result = ocr_with_gemini_arabic(uploaded_file)
+        else:
+            result = ocr_with_gemini_latin(uploaded_file)
         
-        return JsonResponse(result)
+        return JsonResponse({"text": result})
+
